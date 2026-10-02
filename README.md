@@ -77,21 +77,29 @@ That's longer than a whole frame at 120 FPS, and you feel it as stutter.
 SPerformanceT keeps GC off during raids. The cleanup SPT runs when you open your inventory still
 happens, but spread over several frames in small slices instead of one 25 ms frame.
 
-**It won't let you run out of memory.** Once a second it checks the managed heap and free system
-RAM. If either crosses its limit, it runs a cleanup in small slices. If a cleanup doesn't bring
-memory back down, it leaves normal automatic GC on for the rest of that raid. That's how the game
-ran before, so the worst case is the old stutter, never a crash.
+**It won't let you run out of memory.** Garbage collection only manages part of the game's memory.
+On Streets with a big mod list, EFT uses about 30 GB, and only ~3 GB of that is the managed heap GC
+can clean up. The rest is assets. So the safety checks watch that heap, plus Windows' *commit*
+(RAM plus page file), which is what actually crashes a game when it runs out:
+
+- Each time the heap grows by 1 GB, it runs a cleanup in small slices, then GC goes back off.
+- If the heap reaches 6 GB and a cleanup can't bring it under 4.5 GB, automatic GC stays on for
+  the rest of the raid.
+- If free commit falls below 2 GB, it runs a cleanup and leaves automatic GC on for the rest of the
+  raid. That's how the game ran before this mod, so the worst case is the old stutter, never a crash.
+- Low free RAM only produces a warning in the log. GC can't free asset memory, but closing other
+  programs can.
 
 | Setting (F12, "Garbage Collection") | Default | |
 | --- | --- | --- |
 | Keep GC off during raids | true | Turn GC back off after the inventory cleanup. |
 | Time slice (ms) | 2 | The most GC may take in one frame, for this mod's cleanups and for Unity's automatic GC (menus, or after the fallback). |
-| Safety: managed heap limit (GB) | 6 | The heap is usually 1-2 GB at raid start. |
-| Safety: minimum free RAM (GB) | 3 | |
-
+| Safety: clean up after the heap grows by (GB) | 1 | |
+| Safety: managed heap limit (GB) | 6 | |
+| Safety: minimum free commit (GB) | 2 | |
 The log reports each raid:
 ```
-Raid start: GC Disabled, heap 1.05 GB, free RAM 18.20 GB.
-Cleanup done (inventory opened): heap 1.62 GB -> 1.10 GB over 41 frame(s), 340 ms. GC off again.
+Raid start: GC Disabled, heap 2.83 GB, free RAM 3.76 GB, free commit 9.10 GB.
+Cleanup done (inventory opened): heap 3.40 GB -> 2.95 GB over 41 frame(s), 340 ms, longest frame 10.2 ms. GC off again.
 Raid end: peak heap 1.70 GB, 3 inventory cleanup(s), 0 safety cleanup(s), 0 after another mod turned GC on.
 ```

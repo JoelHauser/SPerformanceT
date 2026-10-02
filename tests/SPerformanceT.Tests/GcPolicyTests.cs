@@ -7,55 +7,74 @@ public class GcPolicyTests
 {
     private const long Gb = 1024L * 1024 * 1024;
 
+    // Defaults: heap limit 6 GB, cleanup every 1 GB of growth, emergency below 2 GB free commit.
+    private static SafetyReason Check(double heapGb, double baselineGb, double freeCommitGb) =>
+        GcPolicy.Check((long)(heapGb * Gb), (long)(baselineGb * Gb), (long)(freeCommitGb * Gb), 6, 1, 2);
+
     [Fact]
     public void NothingHappensWithRoomToSpare()
     {
-        Assert.Equal(SafetyReason.None, GcPolicy.Check(2 * Gb, 20 * Gb, 6, 3));
+        Assert.Equal(SafetyReason.None, Check(2.5, 2, 10));
+    }
+
+    [Fact]
+    public void LowFreePhysicalRamIsNotATrigger()
+    {
+        // The 2026-10-02 Streets raid: 3.1 GB heap, barely grown, 2.9 GB free RAM, ~6.5 GB free commit.
+        // 0.3.0 cleaned up on low free RAM, freed 0.23 GB and fell back to automatic GC for nothing.
+        Assert.Equal(SafetyReason.None, Check(3.11, 2.83, 6.5));
+    }
+
+    [Fact]
+    public void HeapGrowthTriggers()
+    {
+        Assert.Equal(SafetyReason.HeapGrowth, Check(3.9, 2.9, 10));
+        Assert.Equal(SafetyReason.None, Check(3.8, 2.9, 10));
     }
 
     [Fact]
     public void HeapAtTheLimitTriggers()
     {
-        Assert.Equal(SafetyReason.HeapLimit, GcPolicy.Check(6 * Gb, 20 * Gb, 6, 3));
+        Assert.Equal(SafetyReason.HeapLimit, Check(6, 5.5, 10));
     }
 
     [Fact]
-    public void LowFreeRamTriggers()
+    public void LowCommitTriggersFirst()
     {
-        Assert.Equal(SafetyReason.LowFreeRam, GcPolicy.Check(2 * Gb, 2 * Gb, 6, 3));
+        Assert.Equal(SafetyReason.LowCommit, Check(7, 2, 1.5));
     }
 
     [Fact]
-    public void HeapLimitWinsWhenBothTrip()
+    public void UnknownCommitIsNotATrigger()
     {
-        Assert.Equal(SafetyReason.HeapLimit, GcPolicy.Check(7 * Gb, 1 * Gb, 6, 3));
+        // ReadMemory reports -1 when GlobalMemoryStatusEx fails.
+        Assert.Equal(SafetyReason.None, GcPolicy.Check(2 * Gb, 2 * Gb, -1, 6, 1, 2));
     }
 
     [Fact]
-    public void UnknownFreeRamIsNotATrigger()
+    public void InventoryAndGrowthCleanupsAlwaysTurnGcOffAgain()
     {
-        // FreeRamBytes returns -1 when GlobalMemoryStatusEx fails.
-        Assert.Equal(SafetyReason.None, GcPolicy.Check(2 * Gb, -1, 6, 3));
+        Assert.True(GcPolicy.SafeToTurnOffAgain(SafetyReason.None, 5 * Gb, 6));
+        Assert.True(GcPolicy.SafeToTurnOffAgain(SafetyReason.HeapGrowth, 5 * Gb, 6));
     }
 
     [Fact]
-    public void AHeapCleanupThatFreesEnoughTurnsGcOffAgain()
+    public void AHeapLimitCleanupThatFreesEnoughTurnsGcOffAgain()
     {
-        Assert.True(GcPolicy.SafeToTurnOffAgain(SafetyReason.HeapLimit, 6 * Gb, 2 * Gb, 6));
+        Assert.True(GcPolicy.SafeToTurnOffAgain(SafetyReason.HeapLimit, 2 * Gb, 6));
     }
 
     [Fact]
     public void AHeapThatStaysNearTheLimitKeepsGcOn()
     {
         // 4.6 GB is above 75% of 6 GB (4.5 GB): mostly live data, so it would trip again at once.
-        Assert.False(GcPolicy.SafeToTurnOffAgain(SafetyReason.HeapLimit, 6 * Gb, (long)(4.6 * Gb), 6));
+        Assert.False(GcPolicy.SafeToTurnOffAgain(SafetyReason.HeapLimit, (long)(4.6 * Gb), 6));
     }
 
     [Fact]
-    public void LowRamCleanupNeedsToFindRealGarbage()
+    public void LowCommitAlwaysKeepsGcOn()
     {
-        Assert.True(GcPolicy.SafeToTurnOffAgain(SafetyReason.LowFreeRam, 4 * Gb, 2 * Gb, 6));
-        Assert.False(GcPolicy.SafeToTurnOffAgain(SafetyReason.LowFreeRam, 4 * Gb, (long)(3.5 * Gb), 6));
+        Assert.False(GcPolicy.SafeToTurnOffAgain(SafetyReason.LowCommit, 1 * Gb, 6));
     }
 
     [Theory]

@@ -69,7 +69,15 @@ Read off the live client and mods on 2026-10-02:
   freed). Otherwise automatic GC stays on for the rest of the raid.
 - `GarbageCollector.GCModeChanged` only sets a flag. The mode is never changed inside the event.
 
-Not run in game yet. Watch the raid start, cleanup and raid end lines, and whether the heap grows in long raids.
+**0.3.0 run in game 2026-10-02 (Streets, ~6 min):** heap 2.83 GB at raid start, peak 3.24 GB. But EFT had
+**30.5 GB private / 19.4 GB working set** (no leak: flat while idle afterwards), system commit 50.3 / 56.8 GB, and
+3.76 GB of free RAM at raid start. The free-RAM trigger fired at 2.87 GB, freed only 0.23 GB, and fell back to
+automatic GC for nothing. That cleanup took 13 frames over 4.5 s (~350 ms a frame), almost certainly because
+marking a heap that was partly paged out stalls on page faults.
+
+**0.3.1** drops free RAM as a trigger (it's only a log warning now) and adds: a cleanup every N GB of heap growth
+(GC goes back off), and an emergency on low *commit* (`MEMORYSTATUSEX.ullAvailPageFile`) that leaves
+automatic GC on. Cleanups log their longest frame, so we can see whether the 2 ms slicing holds. Not run in game yet.
 
 ## Build
 

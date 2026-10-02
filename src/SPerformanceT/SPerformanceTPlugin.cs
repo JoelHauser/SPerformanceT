@@ -20,7 +20,7 @@ namespace SPerformanceT
         public const string PluginName = "SPerformanceT";
 
         /// <summary>Must match the csproj's Version. pack.ps1 refuses to pack if they disagree.</summary>
-        public const string PluginVersion = "0.3.0";
+        public const string PluginVersion = "0.3.1";
 
         private CoreAffinity _affinity;
         private RaidGc _raidGc;

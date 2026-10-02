@@ -21,16 +21,18 @@ namespace SPerformanceT.GarbageCollection
     /// With GC on, boot.config's gc-max-time-slice=10 lets each collection take up to 10 ms of a
     /// frame, which is the stutter.
     ///
-    /// When something turns GC on mid-raid, this finishes that collection in small slices (Manual
-    /// mode, where only explicit collections run) and turns it off again. A safety check every second
-    /// starts the same cleanup if the managed heap or free RAM crosses a limit. If a cleanup does not
-    /// get memory back down, automatic GC stays on for the rest of the raid. That is how it ran before
-    /// this mod, so the worst case is the old stutter, never running out of memory.
+    /// Cleanups run in Manual mode (only explicit collections), one small CollectIncremental slice
+    /// per frame, then GC goes back to Disabled. They run when the inventory opens (replacing SPT's
+    /// single 25 ms one), when the heap has grown by a set amount, and when it reaches a limit. If
+    /// Windows' commit runs low, or a heap-limit cleanup can't get the heap down, automatic GC stays
+    /// on for the rest of the raid. That is how it ran before this mod, so the worst case is the old
+    /// stutter, never running out of memory. See GcPolicy for why free physical RAM is not a trigger.
     /// </summary>
     internal sealed class RaidGc
     {
         private const string Section = "Garbage Collection";
         private const string SptInventoryCleanup = "SPT.Custom.Patches.MemoryCollectionPatch:PatchPostfix";
+        private const double LowRamWarningGb = 2.0;
 
         private static RaidGc _instance;
 
@@ -39,7 +41,8 @@ namespace SPerformanceT.GarbageCollection
         private readonly ConfigEntry<bool> _keepOff;
         private readonly ConfigEntry<float> _sliceMs;
         private readonly ConfigEntry<float> _heapLimitGb;
-        private readonly ConfigEntry<float> _minFreeRamGb;
+        private readonly ConfigEntry<float> _growthGb;
+        private readonly ConfigEntry<float> _minFreeCommitGb;
 
         /// <summary>The game's latest request through InGameMemoryManagement.GCEnabled.</summary>
         private bool _gameWantsOff;
@@ -50,7 +53,6 @@ namespace SPerformanceT.GarbageCollection
         private bool _applying;
         private bool _turnedOnByOther;
         private bool _inventoryOpened;
-        private int _otherCleanups;
 
         private bool _cleaning;
         private string _cleanTrigger;
@@ -58,12 +60,15 @@ namespace SPerformanceT.GarbageCollection
         private long _heapBefore;
         private float _cleanStarted;
         private int _cleanFrames;
+        private float _cleanLongestFrameMs;
 
         private float _nextCheck;
         private float _lastSafety = float.NegativeInfinity;
+        private long _heapBaseline;
         private long _peakHeap;
         private int _inventoryCleanups;
         private int _safetyCleanups;
+        private int _otherCleanups;
         private bool _lowRamWarned;
 
         private RaidGc(ConfigFile config, ManualLogSource log, FieldInfo inRaid)
@@ -84,15 +89,21 @@ namespace SPerformanceT.GarbageCollection
                 + "each cleanup takes more frames.",
                 new AcceptableValueRange<float>(0.5f, 10f)));
 
+            _growthGb = config.Bind(Section, "Safety: clean up after the heap grows by (GB)", 1f, new ConfigDescription(
+                "With GC off, the game's managed memory only grows. Each time it has grown by this much since "
+                + "the last cleanup, a cleanup runs in small slices and GC goes back off. This keeps it "
+                + "bounded without turning automatic GC on.",
+                new AcceptableValueRange<float>(0.25f, 8f)));
+
             _heapLimitGb = config.Bind(Section, "Safety: managed heap limit (GB)", 6f, new ConfigDescription(
-                "If the game's managed memory reaches this during a raid, a cleanup runs. It usually sits "
-                + "at 1-2 GB at raid start. If the cleanup can't bring it under 75% of this, automatic GC "
-                + "stays on for the rest of the raid.",
+                "If the game's managed memory reaches this during a raid, a cleanup runs. If it can't bring "
+                + "it under 75% of this, automatic GC stays on for the rest of the raid.",
                 new AcceptableValueRange<float>(2f, 24f)));
 
-            _minFreeRamGb = config.Bind(Section, "Safety: minimum free RAM (GB)", 3f, new ConfigDescription(
-                "If free system RAM drops below this during a raid, a cleanup runs. If the cleanup finds "
-                + "little to free, automatic GC stays on for the rest of the raid.",
+            _minFreeCommitGb = config.Bind(Section, "Safety: minimum free commit (GB)", 2f, new ConfigDescription(
+                "Commit is the memory Windows has promised to programs, RAM plus page file. Running out of "
+                + "it is what crashes a game. If less than this is left during a raid, a cleanup runs and "
+                + "automatic GC stays on for the rest of the raid.",
                 new AcceptableValueRange<float>(0.5f, 16f)));
 
             _sliceMs.SettingChanged += (_, __) => ApplySlice();
@@ -119,12 +130,14 @@ namespace SPerformanceT.GarbageCollection
                 harmony.Patch(sptCleanup, prefix: new HarmonyMethod(typeof(RaidGc), nameof(SptInventoryCleanupPrefix)));
             else
                 log.LogInfo("SPT's inventory GC patch was not found; its cleanups (if any) are caught when they turn GC on.");
+
             GarbageCollector.GCModeChanged += gc.OnModeChanged;
             gc.ApplySlice();
 
             log.LogInfo("GC: incremental " + (GarbageCollector.isIncremental ? "yes" : "NO (cleanups will be one blocking pass)")
-                        + ", time slice " + gc._sliceMs.Value + " ms, safety limits: heap "
-                        + gc._heapLimitGb.Value + " GB, free RAM " + gc._minFreeRamGb.Value + " GB.");
+                        + ", time slice " + gc._sliceMs.Value + " ms. Raid cleanups every "
+                        + gc._growthGb.Value + " GB of heap growth; safety limits: heap " + gc._heapLimitGb.Value
+                        + " GB, free commit " + gc._minFreeCommitGb.Value + " GB.");
             return gc;
         }
 
@@ -222,15 +235,17 @@ namespace SPerformanceT.GarbageCollection
             _cleaning = false;
             _turnedOnByOther = false;
             _inventoryOpened = false;
-            _otherCleanups = 0;
             _inventoryCleanups = 0;
             _safetyCleanups = 0;
+            _otherCleanups = 0;
             _lowRamWarned = false;
             _lastSafety = float.NegativeInfinity;
             _nextCheck = 0f;
             long heap = GC.GetTotalMemory(false);
             _peakHeap = heap;
+            _heapBaseline = heap;
 
+            ReadMemory(out long freeRam, out long freeCommit);
             GarbageCollector.Mode mode = GarbageCollector.GCMode;
             if (mode == GarbageCollector.Mode.Enabled)
             {
@@ -244,7 +259,7 @@ namespace SPerformanceT.GarbageCollection
                 return;
             }
             _log.LogInfo("Raid start: GC " + mode + ", heap " + GcPolicy.Gb(heap) + ", free RAM "
-                         + GcPolicy.Gb(FreeRamBytes()) + ".");
+                         + GcPolicy.Gb(freeRam) + ", free commit " + GcPolicy.Gb(freeCommit) + ".");
         }
 
         private void EndRaid()
@@ -267,11 +282,22 @@ namespace SPerformanceT.GarbageCollection
             long heap = GC.GetTotalMemory(false);
             if (heap > _peakHeap)
                 _peakHeap = heap;
+            ReadMemory(out long freeRam, out long freeCommit);
+
+            if (!_lowRamWarned && freeRam >= 0 && freeRam < LowRamWarningGb * GcPolicy.BytesPerGb)
+            {
+                _lowRamWarned = true;
+                _log.LogWarning("Free RAM is down to " + GcPolicy.Gb(freeRam) + " (the game has "
+                                + GcPolicy.Gb(heap) + " of managed heap; the rest of its memory is assets, which "
+                                + "GC can't free). Windows is paging, which causes hitches. Closing the browser, "
+                                + "editor and Discord while playing helps.");
+            }
+
             if (_fallback || GarbageCollector.GCMode == GarbageCollector.Mode.Enabled)
                 return; // GC is collecting by itself; nothing to guard
 
-            long free = FreeRamBytes();
-            SafetyReason reason = GcPolicy.Check(heap, free, _heapLimitGb.Value, _minFreeRamGb.Value);
+            SafetyReason reason = GcPolicy.Check(heap, _heapBaseline, freeCommit,
+                _heapLimitGb.Value, _growthGb.Value, _minFreeCommitGb.Value);
             if (reason == SafetyReason.None)
                 return;
             if (Time.realtimeSinceStartup - _lastSafety < GcPolicy.SafetyCooldownSeconds)
@@ -279,10 +305,20 @@ namespace SPerformanceT.GarbageCollection
 
             _lastSafety = Time.realtimeSinceStartup;
             _safetyCleanups++;
-            StartCleanup(reason == SafetyReason.HeapLimit
-                    ? "safety: heap reached " + GcPolicy.Gb(heap) + " (limit " + _heapLimitGb.Value + " GB)"
-                    : "safety: free RAM down to " + GcPolicy.Gb(free) + " (minimum " + _minFreeRamGb.Value + " GB)",
-                reason);
+            string trigger;
+            switch (reason)
+            {
+                case SafetyReason.LowCommit:
+                    trigger = "safety: free commit down to " + GcPolicy.Gb(freeCommit) + " (minimum " + _minFreeCommitGb.Value + " GB)";
+                    break;
+                case SafetyReason.HeapLimit:
+                    trigger = "safety: heap reached " + GcPolicy.Gb(heap) + " (limit " + _heapLimitGb.Value + " GB)";
+                    break;
+                default:
+                    trigger = "heap grew " + GcPolicy.Gb(heap - _heapBaseline) + " since the last cleanup";
+                    break;
+            }
+            StartCleanup(trigger, reason);
         }
 
         private void StartCleanup(string trigger, SafetyReason reason)
@@ -293,24 +329,30 @@ namespace SPerformanceT.GarbageCollection
             _heapBefore = GC.GetTotalMemory(false);
             _cleanStarted = Time.realtimeSinceStartup;
             _cleanFrames = 0;
+            _cleanLongestFrameMs = 0f;
             SetMode(GarbageCollector.Mode.Manual);
             StepCleanup();
         }
 
         private void StepCleanup()
         {
+            // unscaledDeltaTime is the previous frame, which held the previous slice.
+            if (_cleanFrames > 0)
+                _cleanLongestFrameMs = Math.Max(_cleanLongestFrameMs, Time.unscaledDeltaTime * 1000f);
             _cleanFrames++;
+
             bool more = GarbageCollector.CollectIncremental(GcPolicy.SliceNanoseconds(_sliceMs.Value));
             if (more)
                 return;
 
             _cleaning = false;
             long after = GC.GetTotalMemory(false);
-            string took = _cleanFrames + " frame(s), " + ((Time.realtimeSinceStartup - _cleanStarted) * 1000f).ToString("0") + " ms";
+            _heapBaseline = after;
+            string took = _cleanFrames + " frame(s), "
+                          + ((Time.realtimeSinceStartup - _cleanStarted) * 1000f).ToString("0") + " ms, longest frame "
+                          + _cleanLongestFrameMs.ToString("0.0") + " ms";
 
-            bool turnOff = _cleanReason == SafetyReason.None
-                           || GcPolicy.SafeToTurnOffAgain(_cleanReason, _heapBefore, after, _heapLimitGb.Value);
-            if (turnOff)
+            if (GcPolicy.SafeToTurnOffAgain(_cleanReason, after, _heapLimitGb.Value))
             {
                 SetMode(GarbageCollector.Mode.Disabled);
                 _log.LogInfo("Cleanup done (" + _cleanTrigger + "): heap " + GcPolicy.Gb(_heapBefore) + " -> "
@@ -321,14 +363,8 @@ namespace SPerformanceT.GarbageCollection
                 _fallback = true;
                 SetMode(GarbageCollector.Mode.Enabled);
                 _log.LogWarning("Cleanup done (" + _cleanTrigger + "): heap " + GcPolicy.Gb(_heapBefore) + " -> "
-                                + GcPolicy.Gb(after) + " over " + took + ". Not enough was freed, so automatic GC "
-                                + "stays on for the rest of this raid to be safe.");
-            }
-
-            if (_cleanReason == SafetyReason.LowFreeRam && !_lowRamWarned)
-            {
-                _lowRamWarned = true;
-                _log.LogWarning("Free RAM is low. Closing other programs (browser, editor) helps more than anything this mod can do.");
+                                + GcPolicy.Gb(after) + " over " + took + ". To be safe, automatic GC stays on "
+                                + "for the rest of this raid.");
             }
         }
 
@@ -357,10 +393,20 @@ namespace SPerformanceT.GarbageCollection
             GarbageCollector.incrementalTimeSliceNanoseconds = GcPolicy.SliceNanoseconds(_sliceMs.Value);
         }
 
-        private static long FreeRamBytes()
+        /// <summary>Free physical RAM and free commit (limit minus charge). -1 each if unknown.</summary>
+        private static void ReadMemory(out long freeRam, out long freeCommit)
         {
             var status = new MemoryStatusEx { Length = (uint)Marshal.SizeOf(typeof(MemoryStatusEx)) };
-            return GlobalMemoryStatusEx(ref status) ? (long)status.AvailPhys : -1;
+            if (GlobalMemoryStatusEx(ref status))
+            {
+                freeRam = (long)status.AvailPhys;
+                freeCommit = (long)status.AvailPageFile;
+            }
+            else
+            {
+                freeRam = -1;
+                freeCommit = -1;
+            }
         }
 
         [StructLayout(LayoutKind.Sequential)]
