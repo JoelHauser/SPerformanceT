@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <!--
+    Linked rather than project referenced: the plugin targets net472 against BepInEx and Unity,
+    which a test host cannot load. The linked files have no such dependency; keep it that way.
+  -->
+  <ItemGroup>
+    <Compile Include="..\..\src\SPerformanceT\Affinity\AffinityPlan.cs" Link="AffinityPlan.cs" />
+    <Compile Include="..\..\src\SPerformanceT\FrameLimit\FrameLimitMath.cs" Link="FrameLimitMath.cs" />
+    <Compile Include="..\..\src\SPerformanceT\GarbageCollection\GcPolicy.cs" Link="GcPolicy.cs" />
+  </ItemGroup>
+
+</Project>
