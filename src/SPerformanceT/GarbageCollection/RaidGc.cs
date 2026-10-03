@@ -36,6 +36,9 @@ namespace SPerformanceT.GarbageCollection
 
         private static RaidGc _instance;
 
+        /// <summary>EFT's own slice (boot.config gc-max-time-slice, 10 ms), read before anything changes it.</summary>
+        private static ulong _gameSliceNs;
+
         private readonly ManualLogSource _log;
         private readonly FieldInfo _inRaid;
         private readonly ConfigEntry<bool> _keepOff;
@@ -76,18 +79,21 @@ namespace SPerformanceT.GarbageCollection
             _log = log;
             _inRaid = inRaid;
 
-            _keepOff = config.Bind(Section, "Keep GC off during raids", true, new ConfigDescription(
-                "EFT turns garbage collection off for the whole raid, but SPT turns it back on the first "
-                + "time you open your inventory, and it then stays on. With this on, that inventory cleanup "
-                + "still happens, spread over a few frames, and GC goes back off afterwards. The memory "
-                + "safety limits below apply either way."));
+            // Keys renamed in 0.3.2 so that 0.3.0/0.3.1's saved values (on, 2 ms) don't carry over.
+            _keepOff = config.Bind(Section, "Experimental: keep GC off during raids", false, new ConfigDescription(
+                "Off by default, and probably best left off. Keeps garbage collection off in raids (as EFT "
+                + "intends) and cleans up in small slices when the inventory opens or the heap grows. Tested "
+                + "on Streets with a large mod list, it was worse: the mods produced about 20 MB of garbage a "
+                + "second, and every cleanup of the ~3 GB live heap caused 100-350 ms frames however it was "
+                + "sliced. Unity's own automatic GC handled the same load more smoothly. The safety limits "
+                + "below only apply while this is on."));
 
-            _sliceMs = config.Bind(Section, "Time slice (ms)", 2f, new ConfigDescription(
-                "The most time garbage collection may take in one frame, for this mod's cleanups and for "
-                + "Unity's automatic GC whenever it is on (menus, or a raid where the safety fallback kicked "
-                + "in). EFT ships with 10 ms, more than a whole frame at 120 FPS. Lower is smoother, but "
-                + "each cleanup takes more frames.",
-                new AcceptableValueRange<float>(0.5f, 10f)));
+            // No '=' in keys: BepInEx throws on = \n \t \ " ' [ ] (0.3.2 shipped with one; ConfigKeyTests guards it).
+            _sliceMs = config.Bind(Section, "GC time slice in ms (0 for the game default)", 0f, new ConfigDescription(
+                "The most time automatic garbage collection may take in one frame. 0 leaves EFT's own value "
+                + "(10 ms). Lower values spread each collection over more frames, but if the game makes "
+                + "garbage faster than that can collect it, Unity falls back to one long blocking collection.",
+                new AcceptableValueRange<float>(0f, 10f)));
 
             _growthGb = config.Bind(Section, "Safety: clean up after the heap grows by (GB)", 1f, new ConfigDescription(
                 "With GC off, the game's managed memory only grows. Each time it has grown by this much since "
@@ -121,6 +127,7 @@ namespace SPerformanceT.GarbageCollection
                 return null;
             }
 
+            _gameSliceNs = GarbageCollector.incrementalTimeSliceNanoseconds;
             var gc = new RaidGc(config, log, inRaid);
             _instance = gc;
             harmony.Patch(setter, postfix: new HarmonyMethod(typeof(RaidGc), nameof(GcEnabledPostfix)));
@@ -134,10 +141,14 @@ namespace SPerformanceT.GarbageCollection
             GarbageCollector.GCModeChanged += gc.OnModeChanged;
             gc.ApplySlice();
 
-            log.LogInfo("GC: incremental " + (GarbageCollector.isIncremental ? "yes" : "NO (cleanups will be one blocking pass)")
-                        + ", time slice " + gc._sliceMs.Value + " ms. Raid cleanups every "
-                        + gc._growthGb.Value + " GB of heap growth; safety limits: heap " + gc._heapLimitGb.Value
-                        + " GB, free commit " + gc._minFreeCommitGb.Value + " GB.");
+            log.LogInfo("GC: incremental " + (GarbageCollector.isIncremental ? "yes" : "no")
+                        + ", time slice " + (GarbageCollector.incrementalTimeSliceNanoseconds / 1_000_000.0).ToString("0.#")
+                        + " ms" + (gc._sliceMs.Value > 0f ? " (set here)" : " (game default)") + ". "
+                        + (gc._keepOff.Value
+                            ? "Experimental raid GC control ON: cleanups every " + gc._growthGb.Value
+                              + " GB of heap growth; safety limits: heap " + gc._heapLimitGb.Value + " GB, free commit "
+                              + gc._minFreeCommitGb.Value + " GB."
+                            : "Raid GC control off; the game, SPT and other mods decide."));
             return gc;
         }
 
@@ -174,7 +185,7 @@ namespace SPerformanceT.GarbageCollection
         {
             try
             {
-                bool shouldManage = _gameWantsOff && (bool)_inRaid.GetValue(null);
+                bool shouldManage = _keepOff.Value && _gameWantsOff && (bool)_inRaid.GetValue(null);
                 if (shouldManage != _managing)
                 {
                     if (shouldManage)
@@ -341,7 +352,7 @@ namespace SPerformanceT.GarbageCollection
                 _cleanLongestFrameMs = Math.Max(_cleanLongestFrameMs, Time.unscaledDeltaTime * 1000f);
             _cleanFrames++;
 
-            bool more = GarbageCollector.CollectIncremental(GcPolicy.SliceNanoseconds(_sliceMs.Value));
+            bool more = GarbageCollector.CollectIncremental(CleanupSliceNs);
             if (more)
                 return;
 
@@ -390,8 +401,13 @@ namespace SPerformanceT.GarbageCollection
 
         private void ApplySlice()
         {
-            GarbageCollector.incrementalTimeSliceNanoseconds = GcPolicy.SliceNanoseconds(_sliceMs.Value);
+            GarbageCollector.incrementalTimeSliceNanoseconds = _sliceMs.Value > 0f
+                ? GcPolicy.SliceNanoseconds(_sliceMs.Value)
+                : _gameSliceNs;
         }
+
+        /// <summary>This mod's own cleanups: the configured slice, or 2 ms when that is left at the game default.</summary>
+        private ulong CleanupSliceNs => _sliceMs.Value > 0f ? GcPolicy.SliceNanoseconds(_sliceMs.Value) : 2_000_000UL;
 
         /// <summary>Free physical RAM and free commit (limit minus charge). -1 each if unknown.</summary>
         private static void ReadMemory(out long freeRam, out long freeCommit)

@@ -46,7 +46,10 @@ disables GC in raid when RAM >= 25 GB, see `InGameMemoryManagement` and `GameSpa
   SetSleepMode is re-sent every frame. `OnDisable` does `StopCoroutine(SleepCoroutine())` on a new
   enumerator, so coroutines survive disabling. Hence the prefix on `<SleepCoroutine>d__23.MoveNext`,
   which sets `<>4__this.intervalUs` (both checked with Cecil).
-- **Run in game 2026-10-02:** with Reflex OnAndBoost and a 120 cap, 'Reflex frame limit applied: 120 FPS' was logged, the cap held, and\n  frametimes felt smooth (user report). Not tested: whether the cap holds with Reflex On but Boost off.\n- The affinity postfix was seen firing at quit (the game's OnApplicationQuit runs before ours). EFT's own\n  errors.log shows 'Can't set affinity mask' from its physical-cores option, which confirms that option is broken here.
+- **Run in game 2026-10-02:** with Reflex OnAndBoost and a 120 cap, 'Reflex frame limit applied: 120 FPS' was logged, the cap held, and
+  frametimes felt smooth (user report). Not tested: whether the cap holds with Reflex On but Boost off.
+- The affinity postfix was seen firing at quit (the game's OnApplicationQuit runs before ours). EFT's own
+  errors.log shows 'Can't set affinity mask' from its physical-cores option, which confirms that option is broken here.
 
 ## Raid GC (GarbageCollection/), 0.3.0
 
@@ -78,6 +81,34 @@ marking a heap that was partly paged out stalls on page faults.
 **0.3.1** drops free RAM as a trigger (it's only a log warning now) and adds: a cleanup every N GB of heap growth
 (GC goes back off), and an emergency on low *commit* (`MEMORYSTATUSEX.ullAvailPageFile`) that leaves
 automatic GC on. Cleanups log their longest frame, so we can see whether the 2 ms slicing holds. Not run in game yet.
+
+**0.3.1 run in game 2026-10-02 (Streets, 6.5 min): rough, "lots of hitches and freezes".** There were 22 cleanups (17 on
+inventory open, 5 at 1 GB of growth). The heap fell back to ~2.9 GB after every one (live data), and cleanups took
+2-188 frames with the **longest frame 33-353 ms** despite 2 ms slices. About 8 GB of garbage in 6.5 min is ~20 MB/s,
+from the mods. So GC cannot stay off for a raid with this mod list, and cleaning up a 2.9 GB live heap by
+hand stalls whatever the slice. The smooth 0.2.0 raid had automatic GC on all raid (SkillsExtended's option) with
+EFT's 10 ms slice.
+
+**0.3.2:** raid GC control is opt-in ("Experimental: keep GC off during raids", default false). The slice setting is
+"0 = game default" and doesn't change EFT's 10 ms unless set. Both keys were renamed so the old saved values (true / 2 ms)
+don't carry over. Joel's SkillsExtended option was set back to true (backup `com.cj.skillsextended.cfg.bak-2026-10-02`).
+Next: confirm 0.3.2 feels like 0.2.0. Then, if needed, test "Match Unity worker threads" (19 -> 15) on its own,
+since it was also new in 0.3.x.
+
+**0.3.2 had a startup crash:** its key `GC time slice (ms, 0 = game default)` contains `=`, which BepInEx refuses
+(`= 
+ \t \ " ' [ ]`). The ArgumentException left Awake after the frame limit started, so the GC section never
+loaded, and it was visible only in Player.log. The Reserve raid on 0.3.2 therefore ran with GC fully hands-off
+(EFT plus SkillsExtended, 10 ms slice), plus core pinning and 15 workers. **0.3.3** renames the key, starts each
+feature in its own try/catch (logged to LogOutput), and `ConfigKeyTests` reads every `.Bind(` in src and rejects
+forbidden characters.
+
+**0.3.4:** automatic pinning needs at least `MinPerformanceThreads` = 12 P-core threads, so Core Ultra 200 (8 P threads, no HT),
+Lunar Lake and P-series laptops are left alone, server pinning included. Custom mode still pins. `Plan.Note` carries the
+informational "doing nothing" reason, separate from `Problem` (a warning). `CpuCompatibilityTests` models these layouts
+from core counts; only the 12700K was read off hardware. Joel's 0.3.2 Reserve raid "ran fine" (with GC hands-off, pinning
+and 15 workers), but frame times climbed over the raid (his words: about 0.3 ms early to 5+ ms late, metric unknown).
+That is still open and needs a long raid with ModProfiler open from the hideout and exporting every 60 s (enabled in its cfg).
 
 ## Build
 

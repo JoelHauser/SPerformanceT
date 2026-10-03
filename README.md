@@ -18,6 +18,17 @@ by default, so the server's bot generation during a raid doesn't compete with th
 - **Gives the server its cores back** when the game closes or the option is turned off.
 - **Works on Windows 11 too, but helps less there,** since Thread Director already does most of this.
 
+### Which CPUs it pins
+
+| CPU | Automatic mode |
+| --- | --- |
+| Intel 12th-14th gen with E-cores (i5-12600K and up, H-series laptops like the i7-12700H) | Game on the P-cores, server on the E-cores. Tested on an i7-12700K. |
+| Intel without E-cores, any AMD Ryzen | Does nothing. Every core is the same kind. |
+| Core Ultra 200 (285K, 265K), Lunar Lake, P-series laptops (i7-1260P) | Does nothing. These have fewer than 12 P-core threads, and the game needs their E-cores. |
+| Core Ultra 100 laptops (155H: P, E and low-power E-cores) | Game on the P-cores, server on both kinds of E-core. |
+| Two-chiplet Ryzen X3D (7950X3D, 9950X3D) | Not detected. Use Mode `Custom` to put the game on the V-Cache chiplet yourself (often `0xFFFF`). |
+
+On Windows 11 it works the same, but helps less: Windows 11 already moves games onto the P-cores.
 ### Settings (F12, section "CPU Cores")
 
 | Setting | Default | |
@@ -62,44 +73,24 @@ The log confirms it once it takes effect in game:
 Reflex frame limit applied: 158 FPS (6329 us between frames).
 ```
 If that line never appears, Reflex isn't running. Check that it's On in the graphics settings.
-## Garbage collection during raids
+## Garbage collection during raids (experimental, off by default)
 
-EFT is designed to turn garbage collection (GC) off for the whole raid on PCs with 25 GB of RAM
-or more. Two things undo that:
+EFT is designed to turn garbage collection (GC) off for the whole raid. In SPT it ends up on
+anyway: SPT turns it back on the first time you open your inventory, and SkillsExtended keeps it
+on by default.
 
-- **SPT** turns GC back on the first time you open your inventory in a raid, and it stays on.
-- **SkillsExtended** forces GC on for the whole raid by default ("Automatic garbage collection
-  during raids"). Turn that off if you use SkillsExtended.
+SPerformanceT 0.3.0-0.3.1 tried to keep it off, cleaning up in small slices instead. **On a
+Streets run with a big mod list, that was worse.** The mods produced about 20 MB of garbage a
+second, so GC can't stay off for a whole raid. Every cleanup of the ~3 GB of live data caused
+frames of 100-350 ms, however small the slices were. Unity's own automatic GC, which is what
+you get when you leave it alone, handled the same load more smoothly.
 
-With GC on, each collection step can take up to 10 ms of a frame (EFT's `gc-max-time-slice`).
-That's longer than a whole frame at 120 FPS, and you feel it as stutter.
-
-SPerformanceT keeps GC off during raids. The cleanup SPT runs when you open your inventory still
-happens, but spread over several frames in small slices instead of one 25 ms frame.
-
-**It won't let you run out of memory.** Garbage collection only manages part of the game's memory.
-On Streets with a big mod list, EFT uses about 30 GB, and only ~3 GB of that is the managed heap GC
-can clean up. The rest is assets. So the safety checks watch that heap, plus Windows' *commit*
-(RAM plus page file), which is what actually crashes a game when it runs out:
-
-- Each time the heap grows by 1 GB, it runs a cleanup in small slices, then GC goes back off.
-- If the heap reaches 6 GB and a cleanup can't bring it under 4.5 GB, automatic GC stays on for
-  the rest of the raid.
-- If free commit falls below 2 GB, it runs a cleanup and leaves automatic GC on for the rest of the
-  raid. That's how the game ran before this mod, so the worst case is the old stutter, never a crash.
-- Low free RAM only produces a warning in the log. GC can't free asset memory, but closing other
-  programs can.
+So it's now an opt-in experiment, and the time slice defaults to EFT's own value.
 
 | Setting (F12, "Garbage Collection") | Default | |
 | --- | --- | --- |
-| Keep GC off during raids | true | Turn GC back off after the inventory cleanup. |
-| Time slice (ms) | 2 | The most GC may take in one frame, for this mod's cleanups and for Unity's automatic GC (menus, or after the fallback). |
-| Safety: clean up after the heap grows by (GB) | 1 | |
-| Safety: managed heap limit (GB) | 6 | |
-| Safety: minimum free commit (GB) | 2 | |
-The log reports each raid:
-```
-Raid start: GC Disabled, heap 2.83 GB, free RAM 3.76 GB, free commit 9.10 GB.
-Cleanup done (inventory opened): heap 3.40 GB -> 2.95 GB over 41 frame(s), 340 ms, longest frame 10.2 ms. GC off again.
-Raid end: peak heap 1.70 GB, 3 inventory cleanup(s), 0 safety cleanup(s), 0 after another mod turned GC on.
-```
+| Experimental: keep GC off during raids | false | Leave this off unless you want to experiment. |
+| GC time slice in ms (0 for the game default) | 0 | The game default is 10 ms. |
+| Safety settings | | Used only by the experiment: heap growth cleanup, heap limit, free commit. |
+
+If you use SkillsExtended, leave its "Automatic garbage collection during raids" **on** (its default).

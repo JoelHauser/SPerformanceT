@@ -45,6 +45,9 @@ namespace SPerformanceT.Affinity
 
         /// <summary>Something the user should hear about, such as an unusable custom mask. Null if none.</summary>
         public string Problem;
+
+        /// <summary>Why the automatic modes chose to do nothing on this CPU. Informational. Null if none.</summary>
+        public string Note;
     }
 
     /// <summary>
@@ -134,8 +137,22 @@ namespace SPerformanceT.Affinity
                     }
                 }
             }
-            else if (hybrid)
+            else if (!hybrid)
             {
+                plan.Note = "No E-cores on this CPU, so there is nothing to pin. Doing nothing.";
+            }
+            else
+            {
+                int pThreads = CountBits(PerformanceMask(cpus, false));
+                if (pThreads < MinPerformanceThreads)
+                {
+                    // Core Ultra 200 (8 P-cores, no hyperthreading), Lunar Lake, hybrid laptop parts:
+                    // the E-cores carry real game work there, so pinning would starve the game.
+                    plan.Note = "Only " + pThreads + " P-core threads on this CPU (pinning needs at least "
+                                + MinPerformanceThreads + "), so the E-cores are left to the game. Doing nothing. "
+                                + "Mode Custom still pins on request.";
+                    return plan;
+                }
                 bool oneEach = mode == AffinityMode.PerformanceCoresNoHyperthreading;
                 plan.GameMask = PerformanceMask(cpus, oneEach) & systemMask;
             }
@@ -166,12 +183,22 @@ namespace SPerformanceT.Affinity
         /// 20-thread CPU), so once the game is limited to 16 threads, 19 workers plus the main thread
         /// compete for 16.
         /// </summary>
-        public static int WorkerCount(ulong mask)
+        public static int WorkerCount(ulong mask) => Math.Max(1, CountBits(mask) - 1);
+
+        /// <summary>
+        /// Fewest P-core threads automatic pinning will accept. 12 covers Intel 12th-14th gen desktop
+        /// (i5-12600K and up) and H-series laptops (12700H), the CPUs this was built for. Below it are
+        /// CPUs whose E-cores the game needs: Core Ultra 200 (8 threads, no hyperthreading), Lunar
+        /// Lake, the P-series laptops.
+        /// </summary>
+        public const int MinPerformanceThreads = 12;
+
+        public static int CountBits(ulong mask)
         {
-            int threads = 0;
+            int n = 0;
             for (ulong m = mask; m != 0; m &= m - 1)
-                threads++;
-            return Math.Max(1, threads - 1);
+                n++;
+            return n;
         }
 
         public static string Hex(ulong mask) => "0x" + mask.ToString("X", CultureInfo.InvariantCulture);

@@ -149,11 +149,8 @@ namespace SPerformanceT.Affinity
                     _log.LogWarning(plan.Problem);
                 _lastProblem = plan.Problem;
 
-                if (reportProblems && plan.GameMask == 0 && _mode.Value != AffinityMode.Off
-                    && _mode.Value != AffinityMode.Custom && !_gameTouched)
-                {
-                    _log.LogInfo("No E-cores on this CPU, so there is nothing to pin. Doing nothing.");
-                }
+                if (reportProblems && plan.Note != null && !_gameTouched)
+                    _log.LogInfo(plan.Note);
 
                 ApplyGame(plan.GameMask, reason);
                 ApplyWorkers(plan.GameMask);

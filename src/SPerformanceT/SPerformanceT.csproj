@@ -9,7 +9,7 @@
     <Nullable>disable</Nullable>
 
     <!-- Must match SPerformanceTPlugin.PluginVersion. -->
-    <Version>0.3.1</Version>
+    <Version>0.3.4</Version>
 
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
